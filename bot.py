@@ -5,6 +5,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from metaapi_cloud_sdk import MetaApi
 
+
 # Environment variables
 TELEGRAM_TOKEN = os.getenv("TOKEN")
 METAAPI_TOKEN = os.getenv("API_KEY")
