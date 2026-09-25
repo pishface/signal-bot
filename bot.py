@@ -1,6 +1,5 @@
 import os
 import re
-import asyncio
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from metaapi_cloud_sdk import MetaApi
@@ -22,7 +21,7 @@ async def place_trade(symbol, direction, sl, tp, volume=0.01):
     await connection.wait_synchronized()
 
     try:
-        if direction.upper() == "BUY":
+        if direction == "BUY":
             result = await connection.create_market_buy_order(
                 symbol, volume, stop_loss=float(sl), take_profit=float(tp)
             )
@@ -30,41 +29,43 @@ async def place_trade(symbol, direction, sl, tp, volume=0.01):
             result = await connection.create_market_sell_order(
                 symbol, volume, stop_loss=float(sl), take_profit=float(tp)
             )
-        return f"✅ Trade placed\nSymbol: {symbol}\nDirection: {direction}\nSL: {sl}\nTP: {tp}"
+        return f"✅ Trade placed successfully!\n\n{direction} {symbol}\nSL: {sl}\nTP: {tp}"
     except Exception as e:
-        return f"❌ Error placing trade: {str(e)}"
+        return f"❌ Error: {str(e)}"
     finally:
         await connection.close()
 
 def parse_signal(text):
     text = text.upper().replace(",", ".")
     
-    # Common patterns
+    # Detect direction
     direction = None
-    symbol = None
-    sl = None
-    tp = None
-
-    # Find direction
-    if "BUY" in text:
+    if re.search(r'\bBUY\b', text):
         direction = "BUY"
-    elif "SELL" in text:
+    elif re.search(r'\bSELL\b', text):
         direction = "SELL"
 
-    # Find symbol (common ones)
-    symbols = ["XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "BTCUSD", "ETHUSD"]
+    # Detect symbol
+    symbols = [
+        "XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
+        "AUDUSD", "USDCAD", "NZDUSD", "EURGBP", "EURJPY", "GBPJPY",
+        "BTCUSD", "ETHUSD", "US30", "NAS100", "SPX500"
+    ]
+    symbol = None
     for s in symbols:
         if s in text:
             symbol = s
             break
 
-    # Find SL
-    sl_match = re.search(r'SL[:\s]*([\d.]+)', text)
+    # Detect SL
+    sl = None
+    sl_match = re.search(r'(?:SL|STOP\s*LOSS|S/L)[:\s@]*([\d.]+)', text)
     if sl_match:
         sl = sl_match.group(1)
 
-    # Find TP
-    tp_match = re.search(r'TP[:\s]*([\d.]+)', text)
+    # Detect TP (take the first one)
+    tp = None
+    tp_match = re.search(r'(?:TP|TAKE\s*PROFIT|T/P)[:\s@]*([\d.]+)', text)
     if tp_match:
         tp = tp_match.group(1)
 
@@ -74,21 +75,19 @@ def parse_signal(text):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-
     parsed = parse_signal(text)
 
     if not parsed:
         await update.message.reply_text(
-            "Could not understand the signal.\n\n"
-            "Please make sure it contains:\n"
-            "- BUY or SELL\n"
-            "- Symbol (e.g. XAUUSD)\n"
-            "- SL and TP"
+            "❌ Could not understand this signal.\n\n"
+            "Make sure it contains:\n"
+            "• BUY or SELL\n"
+            "• A symbol (XAUUSD, EURUSD, etc.)\n"
+            "• SL and TP numbers"
         )
         return
 
     symbol, direction, sl, tp = parsed
-
     await update.message.reply_text(f"Processing {direction} {symbol}...\nSL: {sl} | TP: {tp}")
 
     result = await place_trade(symbol, direction, sl, tp)
@@ -101,4 +100,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main
