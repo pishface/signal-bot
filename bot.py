@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from metaapi_cloud_sdk import MetaApi
@@ -8,7 +9,7 @@ TELEGRAM_TOKEN = os.getenv("TOKEN")
 METAAPI_TOKEN = os.getenv("API_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 
-async def place_trade(symbol, direction, order_type, entry, sl, tp, volume=0.01):
+async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01):
     api = MetaApi(METAAPI_TOKEN)
     account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
 
@@ -20,26 +21,50 @@ async def place_trade(symbol, direction, order_type, entry, sl, tp, volume=0.01)
     await connection.connect()
     await connection.wait_synchronized()
 
+    # Expiration = 24 hours from now
+    expiration = datetime.utcnow() + timedelta(hours=24)
+
+    results = []
+    volume_per_tp = round(volume / len(tps), 2)
+    if volume_per_tp < 0.01:
+        volume_per_tp = 0.01
+
     try:
-        if order_type == "MARKET":
-            if direction == "BUY":
-                result = await connection.create_market_buy_order(symbol, volume, stop_loss=float(sl), take_profit=float(tp))
-            else:
-                result = await connection.create_market_sell_order(symbol, volume, stop_loss=float(sl), take_profit=float(tp))
+        for i, tp in enumerate(tps):
+            current_volume = volume_per_tp if i < len(tps) - 1 else round(volume - volume_per_tp * (len(tps) - 1), 2)
 
-        elif order_type == "LIMIT":
-            if direction == "BUY":
-                result = await connection.create_limit_buy_order(symbol, volume, float(entry), stop_loss=float(sl), take_profit=float(tp))
-            else:
-                result = await connection.create_limit_sell_order(symbol, volume, float(entry), stop_loss=float(sl), take_profit=float(tp))
+            options = {
+                "stopLoss": float(sl),
+                "takeProfit": float(tp)
+            }
 
-        elif order_type == "STOP":
-            if direction == "BUY":
-                result = await connection.create_stop_buy_order(symbol, volume, float(entry), stop_loss=float(sl), take_profit=float(tp))
-            else:
-                result = await connection.create_stop_sell_order(symbol, volume, float(entry), stop_loss=float(sl), take_profit=float(tp))
+            if order_type != "MARKET":
+                options["expiration"] = {
+                    "type": "ORDER_TIME_SPECIFIED",
+                    "time": expiration.isoformat() + "Z"
+                }
 
-        return f"✅ Order placed!\n\n{direction} {order_type} {symbol}\nEntry: {entry or 'Market'}\nSL: {sl}\nTP: {tp}"
+            if order_type == "MARKET":
+                if direction == "BUY":
+                    result = await connection.create_market_buy_order(symbol, current_volume, **options)
+                else:
+                    result = await connection.create_market_sell_order(symbol, current_volume, **options)
+
+            elif order_type == "LIMIT":
+                if direction == "BUY":
+                    result = await connection.create_limit_buy_order(symbol, current_volume, float(entry), **options)
+                else:
+                    result = await connection.create_limit_sell_order(symbol, current_volume, float(entry), **options)
+
+            elif order_type == "STOP":
+                if direction == "BUY":
+                    result = await connection.create_stop_buy_order(symbol, current_volume, float(entry), **options)
+                else:
+                    result = await connection.create_stop_sell_order(symbol, current_volume, float(entry), **options)
+
+            results.append(f"TP{i+1}: {tp}")
+
+        return f"✅ Order(s) placed!\n\n{direction} {order_type} {symbol}\nEntry: {entry or 'Market'}\nSL: {sl}\n" + "\n".join(results)
     except Exception as e:
         return f"❌ Error: {str(e)}"
     finally:
@@ -47,6 +72,9 @@ async def place_trade(symbol, direction, order_type, entry, sl, tp, volume=0.01)
 
 def parse_signal(text):
     text = text.upper().replace(",", ".")
+
+    # Replace GOLD with XAUUSD
+    text = text.replace("GOLD", "XAUUSD")
 
     # Direction
     direction = None
@@ -70,13 +98,12 @@ def parse_signal(text):
             symbol = s
             break
 
-    # Entry price (for pending orders)
+    # Entry price
     entry = None
     entry_match = re.search(r'(?:AT|@|ENTRY|PRICE)[:\s]*([\d.]+)', text)
     if entry_match:
         entry = entry_match.group(1)
     else:
-        # Sometimes the price is right after BUY/SELL LIMIT
         price_match = re.search(r'(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:AT\s+)?([\d.]+)', text)
         if price_match:
             entry = price_match.group(1)
@@ -87,16 +114,16 @@ def parse_signal(text):
     if sl_match:
         sl = sl_match.group(1)
 
-    # TP
-    tp = None
-    tp_match = re.search(r'(?:TP|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
-    if tp_match:
-        tp = tp_match.group(1)
+    # Multiple TPs
+    tps = re.findall(r'(?:TP|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
+    if not tps:
+        # Also catch lines that just say TP1 4285, TP2 4300 etc.
+        tps = re.findall(r'TP\d*[:\s]*([\d.]+)', text)
 
-    if direction and symbol and sl and tp:
+    if direction and symbol and sl and tps:
         if order_type != "MARKET" and not entry:
-            return None  # Pending orders need an entry price
-        return symbol, direction, order_type, entry, sl, tp
+            return None
+        return symbol, direction, order_type, entry, sl, tps
     return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -106,19 +133,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parsed:
         await update.message.reply_text(
             "❌ Could not understand the signal.\n\n"
-            "Need: BUY/SELL + Symbol + SL + TP\n"
-            "For Limit/Stop orders also need the entry price."
+            "Need: BUY/SELL + Symbol (or GOLD) + SL + at least one TP"
         )
         return
 
-    symbol, direction, order_type, entry, sl, tp = parsed
+    symbol, direction, order_type, entry, sl, tps = parsed
 
     await update.message.reply_text(
         f"Processing {direction} {order_type} {symbol}...\n"
-        f"Entry: {entry or 'Market'} | SL: {sl} | TP: {tp}"
+        f"Entry: {entry or 'Market'} | SL: {sl} | TPs: {', '.join(tps)}"
     )
 
-    result = await place_trade(symbol, direction, order_type, entry, sl, tp)
+    result = await place_trade(symbol, direction, order_type, entry, sl, tps)
     await update.message.reply_text(result)
 
 def main():
