@@ -21,7 +21,6 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
     await connection.connect()
     await connection.wait_synchronized()
 
-    # Expiration = 24 hours from now
     expiration = datetime.utcnow() + timedelta(hours=24)
 
     results = []
@@ -34,8 +33,8 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
             current_volume = volume_per_tp if i < len(tps) - 1 else round(volume - volume_per_tp * (len(tps) - 1), 2)
 
             options = {
-                "stopLoss": float(sl),
-                "takeProfit": float(tp)
+                "stop_loss": float(sl),
+                "take_profit": float(tp)
             }
 
             if order_type != "MARKET":
@@ -72,25 +71,20 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
 
 def parse_signal(text):
     text = text.upper().replace(",", ".")
-
-    # Replace GOLD with XAUUSD
     text = text.replace("GOLD", "XAUUSD")
 
-    # Direction
     direction = None
     if re.search(r'\bBUY\b', text):
         direction = "BUY"
     elif re.search(r'\bSELL\b', text):
         direction = "SELL"
 
-    # Order type
     order_type = "MARKET"
     if "LIMIT" in text:
         order_type = "LIMIT"
     elif "STOP" in text:
         order_type = "STOP"
 
-    # Symbol
     symbols = ["XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "BTCUSD", "ETHUSD"]
     symbol = None
     for s in symbols:
@@ -98,7 +92,6 @@ def parse_signal(text):
             symbol = s
             break
 
-    # Entry price
     entry = None
     entry_match = re.search(r'(?:AT|@|ENTRY|PRICE)[:\s]*([\d.]+)', text)
     if entry_match:
@@ -108,16 +101,13 @@ def parse_signal(text):
         if price_match:
             entry = price_match.group(1)
 
-    # SL
     sl = None
     sl_match = re.search(r'(?:SL|STOP\s*LOSS|S/L)[:\s]*([\d.]+)', text)
     if sl_match:
         sl = sl_match.group(1)
 
-    # Multiple TPs
     tps = re.findall(r'(?:TP|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
     if not tps:
-        # Also catch lines that just say TP1 4285, TP2 4300 etc.
         tps = re.findall(r'TP\d*[:\s]*([\d.]+)', text)
 
     if direction and symbol and sl and tps:
