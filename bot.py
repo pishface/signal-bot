@@ -11,11 +11,9 @@ ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 async def get_connection():
     api = MetaApi(METAAPI_TOKEN)
     account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
-
     if account.state != 'DEPLOYED':
         await account.deploy()
         await account.wait_connected()
-
     connection = account.get_rpc_connection()
     await connection.connect()
     await connection.wait_synchronized()
@@ -55,7 +53,7 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
     finally:
         await connection.close()
 
-async def close_positions(symbol=None):
+async def close_positions(symbol=None, position_id=None):
     connection = await get_connection()
     try:
         positions = await connection.get_positions()
@@ -64,14 +62,15 @@ async def close_positions(symbol=None):
 
         closed = []
         for pos in positions:
-            if symbol is None or pos["symbol"].upper() == symbol.upper():
+            match_symbol = symbol is None or pos["symbol"].upper() == symbol.upper()
+            match_id = position_id is None or str(pos["id"]) == str(position_id)
+            if match_symbol and match_id:
                 await connection.close_position(pos["id"])
-                closed.append(f"{pos['symbol']} {pos['type']} {pos['volume']}")
+                closed.append(f"{pos['symbol']} {pos['type']} {pos['volume']} (ID: {pos['id']})")
 
         if closed:
             return "✅ Closed:\n" + "\n".join(closed)
-        else:
-            return f"No open positions found for {symbol}."
+        return "No matching open positions found."
     except Exception as e:
         return f"❌ Error closing: {str(e)}"
     finally:
@@ -89,6 +88,7 @@ async def show_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for pos in positions:
             profit = pos.get("unrealizedProfit", 0)
             lines.append(
+                f"ID: {pos['id']}\n"
                 f"{pos['symbol']} | {pos['type']} | {pos['volume']} lots\n"
                 f"Entry: {pos['openPrice']} | SL: {pos.get('stopLoss')} | TP: {pos.get('takeProfit')}\n"
                 f"Profit: {profit:.2f}"
@@ -103,27 +103,34 @@ def parse_signal(text):
     text = text.upper().replace(",", ".")
     text = text.replace("GOLD", "XAUUSD")
 
-    # Close command detection
-    if re.search(r'CLOSE.*PIPS?|CLOSE\s+IN', text):
+    # CLOSE command
+    if re.search(r'\bCLOSE\b', text):
         symbol = None
+        position_id = None
         for s in ["XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD", "ETHUSD"]:
             if s in text:
                 symbol = s
                 break
-        return "CLOSE", symbol, None, None, None, None
+        id_match = re.search(r'\b(\d{5,})\b', text)
+        if id_match:
+            position_id = id_match.group(1)
+        return "CLOSE", symbol, position_id, None, None, None
 
+    # Direction
     direction = None
     if re.search(r'\bBUY\b', text):
         direction = "BUY"
     elif re.search(r'\bSELL\b', text):
         direction = "SELL"
 
+    # Order type
     order_type = "MARKET"
     if "LIMIT" in text:
         order_type = "LIMIT"
     elif "STOP" in text:
         order_type = "STOP"
 
+    # Symbol
     symbols = ["XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "BTCUSD", "ETHUSD"]
     symbol = None
     for s in symbols:
@@ -131,20 +138,34 @@ def parse_signal(text):
             symbol = s
             break
 
+    # Entry price + Range support
     entry = None
-    entry_match = re.search(r'(?:AT|@|ENTRY|PRICE)[:\s]*([\d.]+)', text)
-    if entry_match:
-        entry = entry_match.group(1)
+    range_match = re.search(r'([\d.]+)\s*[-–to]+\s*([\d.]+)', text)
+    if range_match:
+        low = float(range_match.group(1))
+        high = float(range_match.group(2))
+        if direction == "BUY":
+            entry = str(min(low, high))   # lower number for Buy Limit
+            order_type = "LIMIT"
+        elif direction == "SELL":
+            entry = str(max(low, high))   # higher number for Sell Limit
+            order_type = "LIMIT"
     else:
-        price_match = re.search(r'(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:AT\s+)?([\d.]+)', text)
-        if price_match:
-            entry = price_match.group(1)
+        entry_match = re.search(r'(?:AT|@|ENTRY|PRICE)[:\s]*([\d.]+)', text)
+        if entry_match:
+            entry = entry_match.group(1)
+        else:
+            price_match = re.search(r'(?:BUY|SELL)\s+(?:LIMIT|STOP)?\s*(?:AT\s*)?([\d.]+)', text)
+            if price_match:
+                entry = price_match.group(1)
 
+    # SL
     sl = None
     sl_match = re.search(r'(?:SL|STOP\s*LOSS|S/L)[:\s]*([\d.]+)', text)
     if sl_match:
         sl = sl_match.group(1)
 
+    # TPs
     tps = re.findall(r'(?:TP\d*|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
 
     if direction and symbol and sl and tps:
@@ -160,15 +181,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parsed:
         await update.message.reply_text(
             "❌ Could not understand the signal.\n\n"
-            "Need: BUY/SELL + Symbol (or GOLD) + SL + at least one TP\n"
-            "Or: close in X pips"
+            "Examples:\n"
+            "BUY XAUUSD SL 2620 TP 2650\n"
+            "BUY GOLD 2650-2660 SL 2640 TP 2680\n"
+            "close position XAUUSD 123456"
         )
         return
 
     if parsed[0] == "CLOSE":
-        _, symbol, *_ = parsed
-        await update.message.reply_text(f"Closing positions{' for ' + symbol if symbol else ''}...")
-        result = await close_positions(symbol)
+        _, symbol, position_id, *_ = parsed
+        msg = "Closing"
+        if symbol:
+            msg += f" {symbol}"
+        if position_id:
+            msg += f" ID {position_id}"
+        await update.message.reply_text(msg + "...")
+        result = await close_positions(symbol, position_id)
         await update.message.reply_text(result)
         return
 
