@@ -1,6 +1,5 @@
 import os
 import re
-from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from metaapi_cloud_sdk import MetaApi
@@ -21,8 +20,6 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
     await connection.connect()
     await connection.wait_synchronized()
 
-    expiration = datetime.utcnow() + timedelta(hours=24)
-
     results = []
     volume_per_tp = round(volume / len(tps), 2)
     if volume_per_tp < 0.01:
@@ -36,12 +33,6 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
                 "stop_loss": float(sl),
                 "take_profit": float(tp)
             }
-
-            if order_type != "MARKET":
-                options["expiration"] = {
-                    "type": "ORDER_TIME_SPECIFIED",
-                    "time": expiration.isoformat() + "Z"
-                }
 
             if order_type == "MARKET":
                 if direction == "BUY":
@@ -106,9 +97,8 @@ def parse_signal(text):
     if sl_match:
         sl = sl_match.group(1)
 
-    tps = re.findall(r'(?:TP|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
-    if not tps:
-        tps = re.findall(r'TP\d*[:\s]*([\d.]+)', text)
+    # Better TP detection - looks for numbers after TP/TP1/TP2 etc.
+    tps = re.findall(r'(?:TP\d*|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
 
     if direction and symbol and sl and tps:
         if order_type != "MARKET" and not entry:
@@ -139,7 +129,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
     print("Bot started...")
     app.run_polling()
 
