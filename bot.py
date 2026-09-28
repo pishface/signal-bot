@@ -138,20 +138,23 @@ def parse_signal(text):
             symbol = s
             break
 
-    # Entry price + Range support
+    # ===== Improved Entry + Range detection =====
     entry = None
-    range_match = re.search(r'([\d.]+)\s*[-–to]+\s*([\d.]+)', text)
+
+    # Look for ranges with - or / 
+    range_match = re.search(r'([\d.]+)\s*[-–/]\s*([\d.]+)', text)
     if range_match:
         low = float(range_match.group(1))
         high = float(range_match.group(2))
         if direction == "BUY":
-            entry = str(min(low, high))   # lower number for Buy Limit
+            entry = str(min(low, high))
             order_type = "LIMIT"
         elif direction == "SELL":
-            entry = str(max(low, high))   # higher number for Sell Limit
+            entry = str(max(low, high))
             order_type = "LIMIT"
     else:
-        entry_match = re.search(r'(?:AT|@|ENTRY|PRICE)[:\s]*([\d.]+)', text)
+        # Normal single entry
+        entry_match = re.search(r'(?:ENTRY\s*POINT|ENTRY|AT|@|PRICE)[:\s]*([\d.]+)', text)
         if entry_match:
             entry = entry_match.group(1)
         else:
@@ -181,10 +184,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parsed:
         await update.message.reply_text(
             "❌ Could not understand the signal.\n\n"
-            "Examples:\n"
-            "BUY XAUUSD SL 2620 TP 2650\n"
-            "BUY GOLD 2650-2660 SL 2640 TP 2680\n"
-            "close position XAUUSD 123456"
+            "Need: BUY/SELL + Symbol (or GOLD) + SL + at least one TP"
         )
         return
 
