@@ -27,7 +27,10 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
     try:
         for i, tp in enumerate(tps):
             current_volume = volume_per_tp if i < len(tps) - 1 else round(volume - volume_per_tp * (len(tps) - 1), 2)
-            options = {"stop_loss": float(sl), "take_profit": float(tp)}
+            options = {
+                "stop_loss": float(sl),
+                "take_profit": float(tp)
+            }
 
             if order_type == "MARKET":
                 if direction == "BUY":
@@ -138,11 +141,9 @@ def parse_signal(text):
             symbol = s
             break
 
-    # ===== Improved Entry + Range detection =====
+    # ===== Entry + Range detection (now supports - / //) =====
     entry = None
-
-    # Look for ranges with - or / 
-    range_match = re.search(r'([\d.]+)\s*[-–/]\s*([\d.]+)', text)
+    range_match = re.search(r'([\d.]+)\s*[-–/]{1,2}\s*([\d.]+)', text)
     if range_match:
         low = float(range_match.group(1))
         high = float(range_match.group(2))
@@ -153,7 +154,6 @@ def parse_signal(text):
             entry = str(max(low, high))
             order_type = "LIMIT"
     else:
-        # Normal single entry
         entry_match = re.search(r'(?:ENTRY\s*POINT|ENTRY|AT|@|PRICE)[:\s]*([\d.]+)', text)
         if entry_match:
             entry = entry_match.group(1)
