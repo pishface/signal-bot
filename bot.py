@@ -51,8 +51,30 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
             results.append(f"TP{i+1}: {tp}")
 
         return f"✅ Order(s) placed!\n\n{direction} {order_type} {symbol}\nEntry: {entry or 'Market'}\nSL: {sl}\n" + "\n".join(results)
+
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        error_msg = str(e)
+
+        # Make common errors clearer
+        if "Validation failed" in error_msg:
+            return (
+                "❌ Validation failed\n\n"
+                "Most common reasons:\n"
+                "• Entry price is on the wrong side of the market\n"
+                "• Stop Loss or Take Profit is too close / invalid\n"
+                "• Broker minimum stop distance not met\n\n"
+                f"Technical details: {error_msg}"
+            )
+        elif "requote" in error_msg.lower():
+            return (
+                "❌ Requote\n\n"
+                "Price moved too fast. Try sending the signal again in a few seconds."
+            )
+        elif "Market is closed" in error_msg:
+            return "❌ Market is currently closed for this symbol."
+        else:
+            return f"❌ Error: {error_msg}"
+
     finally:
         await connection.close()
 
