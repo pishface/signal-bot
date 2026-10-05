@@ -218,9 +218,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trade = pending_trades.pop(chat_id)
 
     if choice.lower() in ["n", "no"]:
-    await update.message.reply_text("❌ Trade cancelled.")
-    return
-elif choice.lower() in ["y", "yes"]:
+       await update.message.reply_text("❌ Trade cancelled.")
+       return
+      elif choice.lower() in ["y", "yes"]:
             # Auto adjust
             new_sl, new_tps = adjust_levels(
                 trade["direction"],
