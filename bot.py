@@ -8,6 +8,12 @@ TELEGRAM_TOKEN = os.getenv("TOKEN")
 METAAPI_TOKEN = os.getenv("API_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 
+# Temporary storage for pending trades that need adjustment
+pending_trades = {}
+
+# Minimum distance in points for gold (you can change this)
+MIN_DISTANCE_GOLD = 40
+
 async def get_connection():
     api = MetaApi(METAAPI_TOKEN)
     account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
@@ -50,33 +56,43 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
 
             results.append(f"TP{i+1}: {tp}")
 
-        return f"✅ Order(s) placed!\n\n{direction} {order_type} {symbol}\nEntry: {entry or 'Market'}\nSL: {sl}\n" + "\n".join(results)
+        return True, f"✅ Order(s) placed!\n\n{direction} {order_type} {symbol}\nEntry: {entry or 'Market'}\nSL: {sl}\n" + "\n".join(results)
 
     except Exception as e:
-        error_msg = str(e)
-
-        # Make common errors clearer
-        if "Validation failed" in error_msg:
-            return (
-                "❌ Validation failed\n\n"
-                "Most common reasons:\n"
-                "• Entry price is on the wrong side of the market\n"
-                "• Stop Loss or Take Profit is too close / invalid\n"
-                "• Broker minimum stop distance not met\n\n"
-                f"Technical details: {error_msg}"
-            )
-        elif "requote" in error_msg.lower():
-            return (
-                "❌ Requote\n\n"
-                "Price moved too fast. Try sending the signal again in a few seconds."
-            )
-        elif "Market is closed" in error_msg:
-            return "❌ Market is currently closed for this symbol."
+        error_msg = str(e).lower()
+        if "invalid stops" in error_msg or "validation failed" in error_msg:
+            return False, "TOO_CLOSE"
+        elif "requote" in error_msg:
+            return False, "❌ Requote – price moved too fast. Try again in a few seconds."
+        elif "market is closed" in error_msg:
+            return False, "❌ Market is currently closed for this symbol."
         else:
-            return f"❌ Error: {error_msg}"
-
+            return False, f"❌ Error: {str(e)}"
     finally:
         await connection.close()
+
+def adjust_levels(direction, entry, sl, tps, min_dist=MIN_DISTANCE_GOLD):
+    """Automatically push SL and TPs to a safer distance"""
+    entry = float(entry) if entry else None
+    sl = float(sl)
+    tps = [float(tp) for tp in tps]
+
+    if direction == "BUY":
+        # SL must be below entry
+        if entry:
+            new_sl = entry - min_dist
+        else:
+            new_sl = sl - min_dist if sl > 0 else sl
+        new_tps = [max(tp, (entry or tp) + min_dist) for tp in tps]
+    else:
+        # SELL
+        if entry:
+            new_sl = entry + min_dist
+        else:
+            new_sl = sl + min_dist
+        new_tps = [min(tp, (entry or tp) - min_dist) for tp in tps]
+
+    return str(round(new_sl, 2)), [str(round(tp, 2)) for tp in new_tps]
 
 async def close_positions(symbol=None, position_id=None):
     connection = await get_connection()
@@ -128,7 +144,6 @@ def parse_signal(text):
     text = text.upper().replace(",", ".")
     text = text.replace("GOLD", "XAUUSD")
 
-    # CLOSE command
     if re.search(r'\bCLOSE\b', text):
         symbol = None
         position_id = None
@@ -141,21 +156,18 @@ def parse_signal(text):
             position_id = id_match.group(1)
         return "CLOSE", symbol, position_id, None, None, None
 
-    # Direction
     direction = None
     if re.search(r'\bBUY\b', text):
         direction = "BUY"
     elif re.search(r'\bSELL\b', text):
         direction = "SELL"
 
-    # Order type
     order_type = "MARKET"
     if "LIMIT" in text:
         order_type = "LIMIT"
     elif "STOP" in text:
         order_type = "STOP"
 
-    # Symbol
     symbols = ["XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "BTCUSD", "ETHUSD"]
     symbol = None
     for s in symbols:
@@ -163,7 +175,6 @@ def parse_signal(text):
             symbol = s
             break
 
-    # ===== Entry + Range detection (now supports - / //) =====
     entry = None
     range_match = re.search(r'([\d.]+)\s*[-–/]{1,2}\s*([\d.]+)', text)
     if range_match:
@@ -176,21 +187,19 @@ def parse_signal(text):
             entry = str(max(low, high))
             order_type = "LIMIT"
     else:
-        entry_match = re.search(r'(?:ENTRY\s*POINT|ENTRY|AT|@|PRICE)[:\s]*([\d.]+)', text)
+        entry_match = re.search(r'(?:ENTRY\s*POINT|ENTRY|AT|@|PRICE|NOW)[:\s]*([\d.]+)', text)
         if entry_match:
             entry = entry_match.group(1)
         else:
-            price_match = re.search(r'(?:BUY|SELL)\s+(?:LIMIT|STOP)?\s*(?:AT\s*)?([\d.]+)', text)
+            price_match = re.search(r'(?:BUY|SELL)\s+(?:LIMIT|STOP|NOW)?\s*(?:AT\s*)?([\d.]+)', text)
             if price_match:
                 entry = price_match.group(1)
 
-    # SL
     sl = None
     sl_match = re.search(r'(?:SL|STOP\s*LOSS|S/L)[:\s]*([\d.]+)', text)
     if sl_match:
         sl = sl_match.group(1)
 
-    # TPs
     tps = re.findall(r'(?:TP\d*|TAKE\s*PROFIT|T/P)[:\s]*([\d.]+)', text)
 
     if direction and symbol and sl and tps:
@@ -200,7 +209,43 @@ def parse_signal(text):
     return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    chat_id = update.effective_chat.id
+    text = update.message.text.strip()
+
+    # Check if user is replying to a pending trade decision
+    if chat_id in pending_trades:
+        choice = text.strip()
+        trade = pending_trades.pop(chat_id)
+
+        if choice == "n","no":
+            await update.message.reply_text("❌ Trade cancelled.")
+            return
+        elif choice == "y","yes":
+            # Auto adjust
+            new_sl, new_tps = adjust_levels(
+                trade["direction"],
+                trade["entry"],
+                trade["sl"],
+                trade["tps"]
+            )
+            await update.message.reply_text(
+                f"Adjusting to safer levels...\n"
+                f"New SL: {new_sl}\n"
+                f"New TPs: {', '.join(new_tps)}"
+            )
+            success, result = await place_trade(
+                trade["symbol"], trade["direction"], trade["order_type"],
+                trade["entry"], new_sl, new_tps
+            )
+            await update.message.reply_text(result if success else result)
+            return
+        else:
+            await update.message.reply_text("Reply **yes** (or y) to automatically adjust to safe distance\n"
+            "Reply **no** (or n) to cancel the trade")
+            pending_trades[chat_id] = trade  # put it back
+            return
+
+    # Normal signal parsing
     parsed = parse_signal(text)
 
     if not parsed:
@@ -229,8 +274,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Entry: {entry or 'Market'} | SL: {sl} | TPs: {', '.join(tps)}"
     )
 
-    result = await place_trade(symbol, direction, order_type, entry, sl, tps)
-    await update.message.reply_text(result)
+    success, result = await place_trade(symbol, direction, order_type, entry, sl, tps)
+
+    if result == "TOO_CLOSE":
+        # Save the trade and ask the user
+        pending_trades[chat_id] = {
+            "symbol": symbol,
+            "direction": direction,
+            "order_type": order_type,
+            "entry": entry,
+            "sl": sl,
+            "tps": tps
+        }
+        await update.message.reply_text(
+            "❌ Stops / TPs are too close for this broker.\n\n"
+            "What do you want to do?\n"
+            "1️⃣ Cancel the trade\n"
+            "2️⃣ Automatically adjust to safe minimum distance\n\n"
+            "Reply with **1** or **2**"
+        )
+    else:
+        await update.message.reply_text(result)
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
