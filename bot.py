@@ -239,10 +239,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(result if success else result)
             return
-         else:
-            await update.message.reply_text("Reply **yes** (or y) to automatically adjust to safe distance\n"
-            "Reply **no** (or n) to cancel the trade")
-            pending_trades[chat_id] = trade  # put it back
+        else:
+            await update.message.reply_text("Please reply with **yes** or **no**.")
+            pending_trades[chat_id] = trade
             return
 
     # Normal signal parsing
