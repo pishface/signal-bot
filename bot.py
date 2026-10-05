@@ -71,29 +71,38 @@ async def place_trade(symbol, direction, order_type, entry, sl, tps, volume=0.01
     finally:
         await connection.close()
 
-def adjust_levels(direction, entry, sl, tps, min_dist=MIN_DISTANCE_GOLD):
-    """Automatically push SL and TPs to a safer distance"""
-    entry = float(entry) if entry else None
+def adjust_levels(direction, entry, sl, tps, min_dist=40):
+    """Push SL and TPs further away to meet minimum distance"""
+    entry_price = float(entry) if entry else None
     sl = float(sl)
     tps = [float(tp) for tp in tps]
 
     if direction == "BUY":
-        # SL must be below entry
-        if entry:
-            new_sl = entry - min_dist
+        # SL below entry
+        if entry_price:
+            new_sl = entry_price - min_dist
         else:
-            new_sl = sl - min_dist if sl > 0 else sl
-        new_tps = [max(tp, (entry or tp) + min_dist) for tp in tps]
+            new_sl = sl - min_dist
+
+        # TPs above entry
+        new_tps = []
+        for i, tp in enumerate(tps):
+            base = entry_price if entry_price else tp
+            new_tps.append(str(round(base + min_dist + (i * 10), 1)))  # spread them out a bit
     else:
         # SELL
-        if entry:
-            new_sl = entry + min_dist
+        if entry_price:
+            new_sl = entry_price + min_dist
         else:
             new_sl = sl + min_dist
-        new_tps = [min(tp, (entry or tp) - min_dist) for tp in tps]
 
-    return str(round(new_sl, 2)), [str(round(tp, 2)) for tp in new_tps]
+        new_tps = []
+        for i, tp in enumerate(tps):
+            base = entry_price if entry_price else tp
+            new_tps.append(str(round(base - min_dist - (i * 10), 1)))
 
+    return str(round(new_sl, 1)), new_tps
+    
 async def close_positions(symbol=None, position_id=None):
     connection = await get_connection()
     try:
@@ -221,7 +230,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Trade cancelled.")
             return
         elif choice.lower() in ["y", "yes"]:
-            # Auto adjust
             new_sl, new_tps = adjust_levels(
                 trade["direction"],
                 trade["entry"],
@@ -237,7 +245,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 trade["symbol"], trade["direction"], trade["order_type"],
                 trade["entry"], new_sl, new_tps
             )
-            await update.message.reply_text(result if success else result)
+            if success:
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text(
+                    "❌ Still rejected after adjusting.\n"
+                    "The broker may require an even bigger distance right now."
+                )
             return
         else:
             await update.message.reply_text("Please reply with **yes** or **no**.")
