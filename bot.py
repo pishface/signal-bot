@@ -290,7 +290,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "What do you want to do?\n"
             "1️⃣ Cancel the trade\n"
             "2️⃣ Automatically adjust to safe minimum distance\n\n"
-            "Reply with **1** or **2**"
+            "Reply with **y** or **n**"
         )
     else:
         await update.message.reply_text(result)
